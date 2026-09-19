@@ -1,0 +1,157 @@
+name: Build Windows 3.20.2-19 ImageGen Router Fix
+
+on:
+  push:
+    branches:
+      - fix/3.20.2-19-imagegen-router-auth
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows-x64:
+    name: Windows x64 portable + NSIS
+    runs-on: windows-2022
+    timeout-minutes: 75
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '20'
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 10.12.3
+          run_install: false
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify v3.20.2-19 and imagegen router patch
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $pkg = Get-Content 'package.json' -Raw | ConvertFrom-Json
+          if ($pkg.version -ne '3.20.2-19') {
+            throw "Expected 3.20.2-19, got $($pkg.version)"
+          }
+
+          $proxy = Get-Content 'src-tauri/src/services/proxy.rs' -Raw
+          $forwarder = Get-Content 'src-tauri/src/proxy/forwarder.rs' -Raw
+          $codex = Get-Content 'src-tauri/src/proxy/providers/codex.rs' -Raw
+          $handlers = Get-Content 'src-tauri/src/proxy/handlers.rs' -Raw
+
+          $markers = @(
+            'CODEX_IMAGEGEN_ACTOR_AUTH_HEADER',
+            'CODEX_IMAGEGEN_ACTOR_AUTH_SENTINEL',
+            'ccswitch-managed-imagegen',
+            'requires_openai_auth"] = toml_edit::value(false)',
+            'is_ccsm_imagegen_actor_marker',
+            'resolve_codex_image_generation_provider',
+            'gpt-image-'
+          )
+          $all = $proxy + $forwarder + $codex + $handlers
+          foreach ($marker in $markers) {
+            if (-not $all.Contains($marker)) {
+              throw "Missing required patch marker: $marker"
+            }
+          }
+
+      - name: Rust format check
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+
+      - name: Run managed-router imagegen facade regression
+        run: cargo test --manifest-path src-tauri/Cargo.toml codex_multirouter_takeover_facade_projects_fully_managed_toml --lib
+
+      - name: Run local actor-header stripping regression
+        run: cargo test --manifest-path src-tauri/Cargo.toml codex_managed_imagegen_actor_marker_is_local_only_but_real_actor_auth_is_preserved --lib
+
+      - name: Run image generation regressions
+        run: cargo test --manifest-path src-tauri/Cargo.toml image_generation --lib
+
+      - name: Build Windows history repair sidecar
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cargo build --manifest-path src-tauri/Cargo.toml --bin codex-history-repairer --features history-repairer --release
+          if (-not (Test-Path 'src-tauri/target/release/codex-history-repairer.exe')) {
+            throw 'codex-history-repairer.exe was not produced'
+          }
+
+      - name: Disable updater signing for fork build
+        shell: pwsh
+        run: |
+          @'
+          {
+            "bundle": {
+              "createUpdaterArtifacts": false
+            }
+          }
+          '@ | Set-Content 'src-tauri/tauri.imagegen-router-fix.conf.json' -Encoding utf8
+
+      - name: Build unsigned Windows x64 app
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          pnpm tauri build --bundles nsis --config src-tauri/tauri.imagegen-router-fix.conf.json
+
+      - name: Collect artifacts
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path artifact | Out-Null
+
+          $portable = 'src-tauri/target/release/cc-switch.exe'
+          if (-not (Test-Path $portable)) {
+            throw "Portable executable not found: $portable"
+          }
+          Copy-Item $portable 'artifact/CCSwitchMulti-3.20.2-19-imagegen-router-fix-x64.exe'
+
+          $sidecar = 'src-tauri/target/release/codex-history-repairer.exe'
+          if (Test-Path $sidecar) {
+            Copy-Item $sidecar 'artifact/codex-history-repairer.exe'
+          }
+
+          $installers = Get-ChildItem 'src-tauri/target/release/bundle/nsis' -Filter '*.exe' -File -ErrorAction SilentlyContinue
+          foreach ($installer in $installers) {
+            Copy-Item $installer.FullName (Join-Path 'artifact' $installer.Name)
+          }
+
+          @" 
+          CCSwitchMulti personal fork build
+          Base version: 3.20.2-19
+          Source branch: $env:GITHUB_REF_NAME
+          Commit: $env:GITHUB_SHA
+
+          Fix:
+          - Fully-managed MultiRouter no longer requires ChatGPT auth, avoiding official zero-quota model gating.
+          - Current Codex still sees the image-generation provider capability through a local-only actor marker.
+          - The synthetic actor marker is stripped by CCSM before real upstream requests.
+          - Existing gpt-image-* image OAuth routing remains enabled.
+
+          Notes:
+          - The currently selected chat model must still advertise image input modality for current Codex to register image_gen.
+          - No OpenAI Platform API key is added or required by this patch.
+          - Unsigned personal fork build.
+          "@ | Set-Content 'artifact/BUILD-INFO.txt' -Encoding utf8
+
+          Get-ChildItem artifact | Format-Table Name,Length
+
+      - name: Upload Windows build
+        uses: actions/upload-artifact@v4
+        with:
+          name: CCSwitchMulti-3.20.2-19-Windows-x64-imagegen-router-fix
+          path: artifact/*
+          if-no-files-found: error
+          retention-days: 14
