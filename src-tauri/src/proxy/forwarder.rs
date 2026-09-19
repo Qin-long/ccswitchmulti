@@ -3578,7 +3578,9 @@ impl RequestForwarder {
         for (key, value) in headers {
             let key_str = key.as_str();
 
-            if outbound_header_is_local_only(key) {
+            if outbound_header_is_local_only(key)
+                || is_ccsm_imagegen_actor_marker(key, value)
+            {
                 continue;
             }
 
@@ -8491,7 +8493,9 @@ fn build_raw_passthrough_headers(
     let mut saw_user_agent = false;
 
     for (name, value) in source_headers.iter() {
-        if raw_passthrough_header_should_skip(name) {
+        if raw_passthrough_header_should_skip(name)
+            || is_ccsm_imagegen_actor_marker(name, value)
+        {
             continue;
         }
         if *name == http::header::USER_AGENT {
@@ -8581,6 +8585,22 @@ fn outbound_header_is_local_only(name: &http::HeaderName) -> bool {
     name.as_str()
         .to_ascii_lowercase()
         .starts_with("x-cc-switch-")
+}
+
+/// The actor header can be a real upstream credential, so only strip the exact
+/// CCSM sentinel injected by the fully-managed MultiRouter facade.
+fn is_ccsm_imagegen_actor_marker(
+    name: &http::HeaderName,
+    value: &http::HeaderValue,
+) -> bool {
+    name.as_str().eq_ignore_ascii_case(
+        crate::proxy::providers::CODEX_IMAGEGEN_ACTOR_AUTH_HEADER,
+    ) && value
+        .to_str()
+        .ok()
+        .is_some_and(|value| {
+            value == crate::proxy::providers::CODEX_IMAGEGEN_ACTOR_AUTH_SENTINEL
+        })
 }
 
 /// 判断 raw passthrough 是否应按流式响应处理。
@@ -9753,6 +9773,35 @@ mod tests {
             &native,
             &headers,
         ));
+    }
+
+    #[test]
+    fn codex_managed_imagegen_actor_marker_is_local_only_but_real_actor_auth_is_preserved() {
+        let actor = http::HeaderName::from_static("x-openai-actor-authorization");
+        let marker = HeaderValue::from_static(
+            crate::proxy::providers::CODEX_IMAGEGEN_ACTOR_AUTH_SENTINEL,
+        );
+        let real = HeaderValue::from_static("real-upstream-actor-token");
+
+        assert!(is_ccsm_imagegen_actor_marker(&actor, &marker));
+        assert!(!is_ccsm_imagegen_actor_marker(&actor, &real));
+
+        let mut source = HeaderMap::new();
+        source.insert(actor.clone(), marker);
+        source.insert("x-user-header", HeaderValue::from_static("kept"));
+        let rebuilt = build_raw_passthrough_headers(&source, &[], None, None);
+        assert!(!rebuilt.contains_key(&actor));
+        assert_eq!(
+            rebuilt
+                .get("x-user-header")
+                .and_then(|value| value.to_str().ok()),
+            Some("kept")
+        );
+
+        let mut source = HeaderMap::new();
+        source.insert(actor.clone(), real.clone());
+        let rebuilt = build_raw_passthrough_headers(&source, &[], None, None);
+        assert_eq!(rebuilt.get(&actor), Some(&real));
     }
 
     #[test]
