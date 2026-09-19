@@ -39,6 +39,10 @@ const CODEX_ROUTER_PLAINTEXT_V2_COLLABORATION: &str = "codexRouterPlaintextV2Col
 const CODEX_RESOLVED_TARGET_PROVIDER_ID: &str = "codexResolvedTargetProviderId";
 const CODEX_RESOLVED_UPSTREAM_MODEL_OVERRIDE: &str = "codexResolvedUpstreamModelOverride";
 const CODEX_NATIVE_AUTH_PASSTHROUGH: &str = "codexNativeAuthPassthrough";
+/// Synthetic actor authorization used only to make current Codex expose the image-generation extension
+/// for a fully managed local MultiRouter without binding the router to ChatGPT quota gating.
+pub(crate) const CODEX_IMAGEGEN_ACTOR_AUTH_HEADER: &str = "x-openai-actor-authorization";
+pub(crate) const CODEX_IMAGEGEN_ACTOR_AUTH_SENTINEL: &str = "ccswitch-managed-imagegen";
 pub(crate) const CODEX_ACCOUNT_POOL_ENABLED: &str = "codexAccountPoolEnabled";
 const QWEN_VLLM_MIN_OUTPUT_TOKENS: u64 = 2_048;
 const RETIRED_QWEN_VLLM_DEFAULT_OUTPUT_TOKENS: u64 = 32_768;
