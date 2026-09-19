@@ -82,6 +82,7 @@ pub(crate) use codex::{
     resolve_codex_chat_reasoning_projection, resolve_codex_native_responses_reasoning_projection,
     resolve_codex_primary_route_from_settings, resolve_codex_request_compatibility,
     strip_legacy_codex_official_auth, CODEX_ACCOUNT_POOL_ENABLED,
+    CODEX_IMAGEGEN_ACTOR_AUTH_HEADER, CODEX_IMAGEGEN_ACTOR_AUTH_SENTINEL,
 };
 pub use codex::{
     apply_codex_chat_upstream_model, apply_codex_upstream_model, build_codex_route_probe_provider,
