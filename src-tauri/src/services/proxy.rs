@@ -4777,12 +4777,31 @@ impl ProxyService {
                         .remove("http_headers");
                 }
             }
-            crate::proxy::providers::CodexMultiRouterAuthFacade::FullyManaged
-            | crate::proxy::providers::CodexMultiRouterAuthFacade::LegacyPreserved => {
-                // Codex Desktop 的账号、用量与退出登录入口由 `requires_openai_auth`
-                // 驱动。即使真实上游凭据由 CCSM/目标 provider 托管，也必须保留这个
-                // 门面，同时继续用 PROXY_MANAGED 占位符命中本地代理；否则升级后用户
-                // 会看不到登录账号且无法退出或重新登录。
+            crate::proxy::providers::CodexMultiRouterAuthFacade::FullyManaged => {
+                // Fully-managed Router traffic must not inherit ChatGPT quota/model gating:
+                // when the Desktop account is out of quota, requires_openai_auth=true can
+                // collapse the picker to the reserve model even though requests are routed
+                // to third-party providers.
+                //
+                // Current Codex also gates the image-generation extension on either native
+                // OpenAI auth or the actor-authorization provider capability. Keep the Router
+                // independent from ChatGPT auth while publishing a local-only actor marker.
+                // The forwarder strips this exact sentinel before any real upstream request.
+                provider["requires_openai_auth"] = toml_edit::value(false);
+                provider["experimental_bearer_token"] = toml_edit::value(PROXY_TOKEN_PLACEHOLDER);
+                let mut headers = toml_edit::InlineTable::new();
+                headers.insert(
+                    crate::proxy::providers::CODEX_IMAGEGEN_ACTOR_AUTH_HEADER,
+                    toml_edit::Value::from(
+                        crate::proxy::providers::CODEX_IMAGEGEN_ACTOR_AUTH_SENTINEL,
+                    ),
+                );
+                provider["http_headers"] =
+                    toml_edit::Item::Value(toml_edit::Value::InlineTable(headers));
+            }
+            crate::proxy::providers::CodexMultiRouterAuthFacade::LegacyPreserved => {
+                // Unknown legacy ownership keeps the prior facade behavior rather than
+                // silently changing authentication semantics during migration.
                 provider["requires_openai_auth"] = toml_edit::value(true);
                 provider["experimental_bearer_token"] = toml_edit::value(PROXY_TOKEN_PLACEHOLDER);
                 provider
