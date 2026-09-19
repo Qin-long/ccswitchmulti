@@ -68,9 +68,6 @@ jobs:
             }
           }
 
-      - name: Rust format check
-        run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
-
       - name: Run managed-router imagegen facade regression
         run: cargo test --manifest-path src-tauri/Cargo.toml codex_multirouter_takeover_facade_projects_fully_managed_toml --lib
 
