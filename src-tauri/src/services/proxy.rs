@@ -4748,7 +4748,27 @@ impl ProxyService {
         provider_id: &str,
         facade: crate::proxy::providers::CodexMultiRouterAuthFacade,
     ) {
-        Self::apply_codex_auth_facade_to_doc(doc, provider_id, facade, Some("router"));
+        if facade != crate::proxy::providers::CodexMultiRouterAuthFacade::FullyManaged {
+            Self::apply_codex_auth_facade_to_doc(doc, provider_id, facade, Some("router"));
+            return;
+        }
+
+        // Fully-managed MultiRouter traffic is independent from the Desktop ChatGPT
+        // account. Keeping requires_openai_auth=true lets a zero-quota account gate
+        // third-party models to the reserve model. Current Codex also requires an
+        // OpenAI actor capability to install image_gen for a non-OpenAI provider, so
+        // publish a synthetic local-only actor marker while keeping request auth owned
+        // by CCSM through PROXY_MANAGED. The forwarder strips this exact sentinel.
+        let provider = &mut doc["model_providers"][provider_id];
+        provider["requires_openai_auth"] = toml_edit::value(false);
+        provider["experimental_bearer_token"] = toml_edit::value(PROXY_TOKEN_PLACEHOLDER);
+        let mut headers = toml_edit::InlineTable::new();
+        headers.insert(
+            crate::proxy::providers::CODEX_IMAGEGEN_ACTOR_AUTH_HEADER,
+            toml_edit::Value::from(crate::proxy::providers::CODEX_IMAGEGEN_ACTOR_AUTH_SENTINEL),
+        );
+        provider["http_headers"] =
+            toml_edit::Item::Value(toml_edit::Value::InlineTable(headers));
     }
 
     fn apply_codex_auth_facade_to_doc(
@@ -4777,31 +4797,11 @@ impl ProxyService {
                         .remove("http_headers");
                 }
             }
-            crate::proxy::providers::CodexMultiRouterAuthFacade::FullyManaged => {
-                // Fully-managed Router traffic must not inherit ChatGPT quota/model gating:
-                // when the Desktop account is out of quota, requires_openai_auth=true can
-                // collapse the picker to the reserve model even though requests are routed
-                // to third-party providers.
-                //
-                // Current Codex also gates the image-generation extension on either native
-                // OpenAI auth or the actor-authorization provider capability. Keep the Router
-                // independent from ChatGPT auth while publishing a local-only actor marker.
-                // The forwarder strips this exact sentinel before any real upstream request.
-                provider["requires_openai_auth"] = toml_edit::value(false);
-                provider["experimental_bearer_token"] = toml_edit::value(PROXY_TOKEN_PLACEHOLDER);
-                let mut headers = toml_edit::InlineTable::new();
-                headers.insert(
-                    crate::proxy::providers::CODEX_IMAGEGEN_ACTOR_AUTH_HEADER,
-                    toml_edit::Value::from(
-                        crate::proxy::providers::CODEX_IMAGEGEN_ACTOR_AUTH_SENTINEL,
-                    ),
-                );
-                provider["http_headers"] =
-                    toml_edit::Item::Value(toml_edit::Value::InlineTable(headers));
-            }
-            crate::proxy::providers::CodexMultiRouterAuthFacade::LegacyPreserved => {
-                // Unknown legacy ownership keeps the prior facade behavior rather than
-                // silently changing authentication semantics during migration.
+            crate::proxy::providers::CodexMultiRouterAuthFacade::FullyManaged
+            | crate::proxy::providers::CodexMultiRouterAuthFacade::LegacyPreserved => {
+                // Direct official/legacy facades retain upstream CCSM behavior. The
+                // MultiRouter-only fully-managed override lives above so it does not
+                // alter direct OpenAI Official account semantics.
                 provider["requires_openai_auth"] = toml_edit::value(true);
                 provider["experimental_bearer_token"] = toml_edit::value(PROXY_TOKEN_PLACEHOLDER);
                 provider
@@ -8785,8 +8785,8 @@ supports_websockets = true
 
     #[test]
     fn codex_multirouter_takeover_facade_projects_fully_managed_toml() {
-        // 回归：managed_codex_oauth 的 MultiRouter 也必须保留 OpenAI 认证门面，
-        // 否则 Codex Desktop 会丢失账号、用量和退出/重新登录入口。
+        // Fully-managed MultiRouter must stay independent from Desktop quota gating
+        // while still advertising image-generation capability to current Codex.
         let provider = codex_multirouter_provider("managed_codex_oauth");
         let output = ProxyService::apply_codex_proxy_toml_config_with_pool_policy(
             r#"[model_providers.codex_model_router_v2]
@@ -8804,7 +8804,7 @@ http_headers = { x-cc-switch-proxy-mode = "router", x-user-header = "drop-with-o
             [crate::codex_config::CC_SWITCH_CODEX_ROUTER_MODEL_PROVIDER_ID];
 
         assert_eq!(route["name"].as_str(), Some("OpenAI"));
-        assert_eq!(route["requires_openai_auth"].as_bool(), Some(true));
+        assert_eq!(route["requires_openai_auth"].as_bool(), Some(false));
         assert_eq!(
             route["supports_standalone_web_search"].as_bool(),
             Some(true)
@@ -8814,6 +8814,15 @@ http_headers = { x-cc-switch-proxy-mode = "router", x-user-header = "drop-with-o
             Some(PROXY_TOKEN_PLACEHOLDER)
         );
         assert_eq!(
+            route["http_headers"][crate::proxy::providers::CODEX_IMAGEGEN_ACTOR_AUTH_HEADER]
+                .as_str(),
+            Some(crate::proxy::providers::CODEX_IMAGEGEN_ACTOR_AUTH_SENTINEL)
+        );
+        assert!(
+            route["http_headers"].get("x-cc-switch-proxy-mode").is_none(),
+            "fully managed router must not ask Codex to reuse Desktop OAuth"
+        );
+        assert_eq!(
             route["request_max_retries"].as_integer(),
             Some(crate::codex_config::CODEX_MANAGED_REQUEST_MAX_RETRIES as i64)
         );
@@ -8821,7 +8830,6 @@ http_headers = { x-cc-switch-proxy-mode = "router", x-user-header = "drop-with-o
             route["stream_max_retries"].as_integer(),
             Some(crate::codex_config::CODEX_MANAGED_STREAM_MAX_RETRIES as i64)
         );
-        assert!(route.get("http_headers").is_none());
     }
 
     #[test]
@@ -8958,7 +8966,12 @@ name = "OpenAI"
             [crate::codex_config::CC_SWITCH_CODEX_ROUTER_MODEL_PROVIDER_ID];
 
         assert_eq!(route["name"].as_str(), Some("OpenAI"));
-        assert_eq!(route["requires_openai_auth"].as_bool(), Some(true));
+        assert_eq!(route["requires_openai_auth"].as_bool(), Some(false));
+        assert_eq!(
+            route["http_headers"][crate::proxy::providers::CODEX_IMAGEGEN_ACTOR_AUTH_HEADER]
+                .as_str(),
+            Some(crate::proxy::providers::CODEX_IMAGEGEN_ACTOR_AUTH_SENTINEL)
+        );
     }
 
     #[tokio::test]
@@ -9044,10 +9057,14 @@ supports_websockets = false
         let managed_live = std::fs::read_to_string(crate::codex_config::get_codex_config_path())
             .expect("read managed live");
         assert!(
-            managed_live.contains("requires_openai_auth = true"),
-            "fully managed routes still need the Desktop login facade"
+            managed_live.contains("requires_openai_auth = false"),
+            "fully managed Router must not inherit Desktop quota gating"
         );
         assert!(managed_live.contains("experimental_bearer_token = \"PROXY_MANAGED\""));
+        assert!(managed_live.contains("x-openai-actor-authorization"));
+        assert!(managed_live.contains(
+            crate::proxy::providers::CODEX_IMAGEGEN_ACTOR_AUTH_SENTINEL
+        ));
         assert_eq!(
             crate::config::read_json_file::<Value>(&crate::codex_config::get_codex_auth_path())
                 .expect("read auth after managed"),
